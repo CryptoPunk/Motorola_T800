@@ -1,0 +1,12 @@
+01000100-0000-1000-8000-009078563412: SERVICE_CMD_SERVICE 
+02000200-0000-1000-8000-009178563412: CHARACTERISTICS_TX
+    descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+    00002902-0000-1000-8000-00805f9b34fb
+03000300-0000-1000-8000-009278563412: CHARACTERISTICS_RX
+    setWriteType(WRITE_TYPE_NO_RESPONSE);
+    handler.removeCallbacks(BluetoothManager.this.mCommandTimeoutRunnable);
+    handler.postDelayed(BluetoothManager.this.mCommandTimeoutRunnable, 10);
+    mBleStateListener.onStatusChange(null, 0, 50000);
+
+
+
