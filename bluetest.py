@@ -37,11 +37,11 @@ MSG_IS_GROUP     = 64  # 01000000
 MSG_IS_SHOUT     = 96  # 01100000
 MSG_BIT_RESPONSE = 128 # 10000000
 
-class MotoT800Client():
-    SERVICE_CMD_SERVICE = "01000100-0000-1000-8000-009078563412"
-    CHARACTERISTICS_TX = "02000200-0000-1000-8000-009178563412"
-    CHARACTERISTICS_RX = "03000300-0000-1000-8000-009278563412"
+SERVICE_CMD_SERVICE = "01000100-0000-1000-8000-009078563412"
+CHARACTERISTICS_TX = "02000200-0000-1000-8000-009178563412"
+CHARACTERISTICS_RX = "03000300-0000-1000-8000-009278563412"
 
+class MotoT800Client():
     def __init__(self, address):
         self.client = BleakClient(address)
         self.address = address
@@ -52,8 +52,8 @@ class MotoT800Client():
 
     @staticmethod
     def msg_encode(data):
-        if len(data) > 20:
-            raise ValueError("payload size over 20 not implemented currently")
+        #if len(data) > 20:
+        #    raise ValueError("payload size over 20 not implemented currently")
         out = bytearray(len(data)+4)
         out[0] = 126
         out[1] = len(data)+2
@@ -111,29 +111,76 @@ class MotoT800Client():
 
     async def send(self,msg):
         data = self.msg_encode(msg)
+        while len(data) > 20:
+            await self.client.write_gatt_char(self.rx_char, data[:20])
+            data = data[20:]
         await self.client.write_gatt_char(self.rx_char, data)
-    
+
     async def set_owner(self,owner_id):
         msg = bytearray(7)
         msg[0] = REQUEST_ID_SET_OWNER
         msg[1:7] = owner_id.to_bytes(length=6,byteorder='little')
         await self.send(msg)
-        
-address = "44:D5:F2:98:A7:97"
+
+
+class Message():
+    def __init__(self,src,dst,type_code,latitude,longitude,message_id,content):
+        self.cmd = 0xd0
+        self.src = src
+        self.dst = dst
+        self.type_code = type_code
+        self.latitude = latitude
+        self.longitude = longitude
+        self.message_id = message_id
+        self.content = content
+
+    @classmethod
+    def acknowledge(cls, other):
+        ack = cls(other.dst,other.src,other.type_code|128,other.latitude,other.longitude,other.message_id,b'')
+        return ack
+
+    @classmethod
+    def from_bytes(cls, msg):
+        src = int.from_bytes(msg[1:1+6], "little")
+        dst = int.from_bytes(msg[8:8+6], "little")
+        type_code = msg[14]
+        latitude = int.from_bytes(msg[15:15+4], "little")
+        longitude = int.from_bytes(msg[19:19+4],"little")
+        message_id = int.from_bytes(msg[23:23+4],"little")
+        content = msg[27:]
+        self = cls(src,dst,type_code,latitude,longitude,message_id,content)
+        return self
+
+    def to_bytes(self):
+        msg = bytearray(len(self.content)+27)
+        msg[0] = self.cmd
+        msg[1:1+6] = int.to_bytes(self.src,length=6,byteorder="little")
+        msg[8:8+6] = int.to_bytes(self.dst,length=6,byteorder="little")
+        msg[14] = self.type_code
+        msg[15:15+4] = int.to_bytes(self.latitude,length=4,byteorder="little")
+        msg[19:19+4] = int.to_bytes(self.longitude,length=4,byteorder="little")
+        msg[23:23+4] = int.to_bytes(self.message_id,length=4,byteorder="little")
+        msg[27:] = self.content
+        return bytes(msg)
+
 
 async def main():
-   async with MotoT800Client(address) as client:
+    address = "44:D5:F2:98:A7:97"
+    async with MotoT800Client(address) as client:
         await client.set_owner(0x1337cafebabe)
-        print('owner set')
-        #await client.write_gatt_char(rx, msg(bytearray([256-50])))
-        #await client.write_gatt_char(rx, msg(bytearray([256-56])))
-        #data = await client.read_gatt_char(tx)
-        #print(data)
-        #await client.connect()
+
+        msg = await client.recv()
+        
+        msg = Message(0x1337cafebabe, 91651965531785, 32, 4758068, 4282736887, 989085074, b'yeah!')
+        await client.send(msg.to_bytes())
         for i in range(100):
             msg = await client.recv()
+            if msg[0] == 0xd0:
+                txt = Message.from_bytes(msg)
+                print('type_code: {:08b}'.format(txt.type_code))
+                if txt.type_code & 128 != 128 and txt.dst == 0x1337cafebabe:
+                    ack = Message.acknowledge(txt)
+                    await client.send(ack.to_bytes())
+                    print("sent ack")
 
-
-msg = b'7e21d08936d9625b530000000000000000369a48'
-msg2 = b'00f46045ff29e8f6027465737412ef'
 asyncio.run(main())
