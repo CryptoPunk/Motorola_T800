@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 import asyncio
+import binascii
 from functools import partial
 from bleak import BleakClient
 
-address = "44:D5:F2:98:A7:97"
-SERVICE_CMD_SERVICE = "01000100-0000-1000-8000-009078563412"
-CHARACTERISTICS_TX = "02000200-0000-1000-8000-009178563412"
-CHARACTERISTICS_RX = "03000300-0000-1000-8000-009278563412"
 
+EASYPAIRING_FRAGMENT_1 = 0xb3 # 179
+EASYPAIRING_FRAGMENT_2 = 0xb4 # 180
+REQUEST_ID_READ_STATUS = 0xca # 202
+REQUEST_ID_READ_BATTERY = 0xce # 206
+REQUEST_ID_SEND_MESSAGE = 0xd0 # 208
+REQUEST_ID_SET_OWNER = 0xa0
 
-EASYPAIRING_FRAGMENT_1 = 179
-EASYPAIRING_FRAGMENT_2 = 180
-REQUEST_ID_READ_STATUS = 202
-REQUEST_ID_READ_BATTERY = 206
-REQUEST_ID_SEND_MESSAGE = 208
-SHARELOCATION = 224 
-ECC = 227
-RADIO_RESPONSE = 238
+SHARELOCATION = 0xe0 # 224 
+ECC = 0xe3 # 227
+RADIO_RESPONSE = 0xee # 238
 
 
 MSG_TYPE_TEXT            = 0
@@ -39,48 +37,103 @@ MSG_IS_GROUP     = 64  # 01000000
 MSG_IS_SHOUT     = 96  # 01100000
 MSG_BIT_RESPONSE = 128 # 10000000
 
-def notify_callback(client: BleakClient, sender: int, data: bytearray):
-    if data[2] in (REQUEST_ID_SEND_MESSAGE, SHARELOCATION, ECC, RADIO_RESPONSE):
-        cmd = msg[0]
-        src = msg[1:8]
-        dst = msg[8:14]
-        _type = msg[14]
-        latitude = msg[15:15+4]
-        longitude = msg[19:19+4]
-        message_id = msg[23:23+4]
+class MotoT800Client():
+    SERVICE_CMD_SERVICE = "01000100-0000-1000-8000-009078563412"
+    CHARACTERISTICS_TX = "02000200-0000-1000-8000-009178563412"
+    CHARACTERISTICS_RX = "03000300-0000-1000-8000-009278563412"
 
-        content = msg[27:]
+    def __init__(self, address):
+        self.client = BleakClient(address)
+        self.address = address
+        self.tx_queue = asyncio.Queue()
+        
+    def notify_callback(self, sender, data):
+        self.tx_queue.put_nowait(data)
 
-    """Notification callback with client awareness"""
-    print(
-        f"Notification from device with address {client.address} and characteristic with handle {client.services.get_characteristic(sender)}. Data: {data}"
-    )
+    @staticmethod
+    def msg_encode(data):
+        if len(data) > 20:
+            raise ValueError("payload size over 20 not implemented currently")
+        out = bytearray(len(data)+4)
+        out[0] = 126
+        out[1] = len(data)+2
+        out[2:len(data)+2] = data
+        out[len(data)+2] = sum(out[1:]) & 0xFF
+        out[len(data)+3] = 239
 
-def msg(data):
-    out = bytearray(len(data)+4)
-    out[0] = 126
-    out[1] = len(data)+2
-    out[2:len(data)+2] = data
-    out[len(data)+2] = sum(out[1:]) & 0xFF
-    out[len(data)+3] = 239
+        return out
 
-    return out
- 
+    async def connect(self):
+        await self.client.connect()
+        svcs = await self.client.get_services()
+        cmd_svc = svcs.get_service(SERVICE_CMD_SERVICE)
+        self.tx_char = cmd_svc.get_characteristic(CHARACTERISTICS_TX)
+        self.rx_char = cmd_svc.get_characteristic(CHARACTERISTICS_RX)
+        await self.client.start_notify(self.tx_char, self.notify_callback)
+
+    async def disconnect(self):
+        for worker in self.workers:
+            worker.cancel()
+        asyncio.gather(*self.workers, return_exceptions=True)
+        await self.client.disconnect()
+        self.tx_char = None
+        self.rx_char = None
+
+    async def __aenter__(self):
+        await self.connect()
+        return self
+
+    async def __aexit__(self):
+        await self.disconnect()
+
+    async def recv(self):
+        data = await self.tx_queue.get()
+        reads = 1
+        try:
+            if data[0] != 0x7e:
+                raise ValueError("Received invalid start byte")
+            while len(data)-2 < data[1]:
+                data += await self.tx_queue.get()
+                reads += 1
+
+            cksum = sum(data[1:-2]) & 0xFF
+            if data[-2] != cksum:
+                raise ValueError("checksum error in decode")
+            if data[-1] != 0xef:
+                raise ValueError("Received invalid stop byte")
+            print(binascii.hexlify(data[2:-2]))
+            return data[2:-2]
+        except Exception as e:
+            raise e
+        finally:
+            for i in range(reads):
+                self.tx_queue.task_done()
+
+    async def send(self,msg):
+        data = self.msg_encode(msg)
+        await self.client.write_gatt_char(self.rx_char, data)
+    
+    async def set_owner(self,owner_id):
+        msg = bytearray(7)
+        msg[0] = REQUEST_ID_SET_OWNER
+        msg[1:7] = owner_id.to_bytes(length=6,byteorder='little')
+        await self.send(msg)
+        
+address = "44:D5:F2:98:A7:97"
 
 async def main():
-    async with BleakClient(address) as client:
-        #await client.connect()
-        svcs = await client.get_services()
-        cmd_svc = svcs.get_service(SERVICE_CMD_SERVICE)
-        tx = cmd_svc.get_characteristic(CHARACTERISTICS_TX)
-        await client.start_notify(tx, partial(notify_callback, client))
-        rx = cmd_svc.get_characteristic(CHARACTERISTICS_RX)
-
+   async with MotoT800Client(address) as client:
+        await client.set_owner(0x1337cafebabe)
+        print('owner set')
         #await client.write_gatt_char(rx, msg(bytearray([256-50])))
         #await client.write_gatt_char(rx, msg(bytearray([256-56])))
-        await client.write_gatt_char(rx, msg(bytearray([256-96, 0xbe, 0xba, 0xfe, 0xca, 0x37, 0x13])))
         #data = await client.read_gatt_char(tx)
         #print(data)
-        await asyncio.sleep(100.0)
-        
+        #await client.connect()
+        for i in range(100):
+            msg = await client.recv()
+
+
+msg = b'7e21d08936d9625b530000000000000000369a48'
+msg2 = b'00f46045ff29e8f6027465737412ef'
 asyncio.run(main())
